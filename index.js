@@ -1,43 +1,59 @@
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
-const { Low, JSONFile } = require('lowdb');
-const { join } = require('path');
+const webpush = require('web-push');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Initialize LowDB
-const file = join(__dirname, 'db.json');
-const adapter = new JSONFile(file);
-const db = new Low(adapter);
+// MongoDB connection string (you'll need to set this in Vercel environment variables)
+const uri = process.env.MONGODB_URI;
 
-// Initialize the database with a default structure
-const initializeDb = async () => {
-  await db.read();
-  db.data ||= { subscriptions: [] }; // Default structure
-  await db.write();
-};
+// VAPID keys (set these in Vercel environment variables)
+const publicVapidKey = process.env.PUBLIC_VAPID_KEY;
+const privateVapidKey = process.env.PRIVATE_VAPID_KEY;
 
-initializeDb();
+webpush.setVapidDetails(
+  'mailto:your@email.com',
+  publicVapidKey,
+  privateVapidKey
+);
 
-const port = process.env.PORT || 4000;
+let db;
 
-app.get("/", (req, res) => res.send("Hello World!"));
+// Connect to MongoDB
+async function connectToDatabase() {
+  const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true });
+  await client.connect();
+  db = client.db('pushnotifications');  // Replace with your database name
+  console.log('Connected to MongoDB');
+}
 
-// Method to save the subscription to the database
-const saveToDatabase = async (subscription) => {
-  await db.read();
-  db.data.subscriptions.push(subscription);
-  await db.write();
-};
+connectToDatabase().catch(console.error);
 
-// The /save-subscription endpoint
-app.post("/save-subscription", async (req, res) => {
+app.get("/api", (req, res) => res.send("Hello World!"));
+
+// The /api/save-subscription endpoint
+app.post("/api/save-subscription", async (req, res) => {
   const subscription = req.body;
-  await saveToDatabase(subscription);
+  await db.collection('subscriptions').insertOne(subscription);
   res.json({ message: "success" });
 });
 
-app.listen(port, () => console.log(`Server is running on port ${port}!`));
+// New endpoint to send push notification
+app.post("/api/send-notification", async (req, res) => {
+  const { title, body } = req.body;
+  const subscriptions = await db.collection('subscriptions').find({}).toArray();
+  
+  const notifications = subscriptions.map(subscription => {
+    return webpush.sendNotification(subscription, JSON.stringify({ title, body }))
+      .catch(err => console.error('Error sending notification, subscription removed', err));
+  });
+
+  await Promise.all(notifications);
+  res.json({ message: "Notifications sent" });
+});
+
+module.exports = app;
